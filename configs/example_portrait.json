@@ -1,0 +1,45 @@
+{
+  "prefix": "cfg45",
+  "num_steps": 70,
+  "seed": 2025,
+  "cfg_scale": 4.5,
+  "width": 1024,
+  "height": 1024,
+  "num_crops": 3,
+  "tiles_per_crop": 5,
+  "background_prompt": "A portrait of a person, in front of a white background, neck and above",
+  "background_negative_prompt": "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+  "tile_prompts": [
+    ["A top-hat over a man's head", "The bald top of head", "A fireman's helmet", "A mohawk haircut", "A crown, laying on a bald scalp"],
+    ["Gentle face of a woman, with a nose piercing", "A face of a man with a mustache wearing glasses", "Green alien face, with three eyes", "A gorilla's face", "A tattooed face, long stitched cut below the eye"],
+    ["A bearded, thick and scruffy neck of a man", "A long and slender neck of a woman", "The neck of a beheaded head, only the top cut part of the neck", "A scarf wrapping a wide, man's neck", "A human neck, with gills on the sides"]
+  ],
+  "tile_negative_prompts": [
+    ["low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark"],
+    ["low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark"],
+    ["low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark", "low quality, worst quality, over-saturated, blurry, deformed, watermark"]
+  ],
+  "late_prompting": 2,
+  "attend_on_avg": true,
+  "average_target": "keys_values",
+  "crops": [
+    {"x": 0, "y": 0,   "width": 1024, "height": 208},
+    {"x": 0, "y": 208, "width": 1024, "height": 432},
+    {"x": 0, "y": 640, "width": 1024, "height": 384}
+  ],
+  "static_cropping": false,
+  "dynamic_cropping": "MRF_alpha",
+  "mode_filter": 3,
+  "mrf_smoothness": 0.02,
+  "saliency": true,
+  "background_crop": true,
+  "saliency_direction": "image_to_prompt",
+  "saliency_word_reduction": "max",
+  "saliency_crop_reduction": "mean",
+  "per_crop_normalize": "min_max",
+  "gaussian_sigma": 32,
+  "group_patches_by_crop": true,
+  "sequential_cfg": true,
+  "visualize": true,
+  "save_separate_tiles": false
+}

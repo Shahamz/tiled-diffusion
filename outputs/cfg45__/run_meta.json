@@ -1,0 +1,65 @@
+{
+  "args": {
+    "config": "configs/portrait.json",
+    "out": "outputs",
+    "steps": 40,
+    "seed": 151,
+    "cfg_scale": 7.5,
+    "scheduler": "ddpm",
+    "tile_width": 512,
+    "tile_height": 512,
+    "max_width": 32,
+    "max_replica_width": 5,
+    "max_combos": 0,
+    "dry_run": false,
+    "show": false
+  },
+  "num_crops": 3,
+  "tiles_per_crop": 5,
+  "tile_prompts": [
+    [
+      "A top-hat over a man's head",
+      "The bald top of head",
+      "A fireman's helmet",
+      "A mohawk haircut",
+      "A crown, laying on a bald scalp"
+    ],
+    [
+      "Gentle face of a woman, with a nose piercing",
+      "A face of a man with a mustache wearing glasses",
+      "Green alien face, with three eyes",
+      "A gorilla's face",
+      "A tattooed face, long stitched cut below the eye"
+    ],
+    [
+      "A bearded, thick and scruffy neck of a man",
+      "A long and slender neck of a woman",
+      "The neck of a beheaded head, only the top cut part of the neck",
+      "A scarf wrapping a wide, man's neck",
+      "A human neck, with gills on the sides"
+    ]
+  ],
+  "tile_negative_prompts": [
+    [
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark"
+    ],
+    [
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark"
+    ],
+    [
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark",
+      "low quality, worst quality, over-saturated, blurry, deformed, watermark"
+    ]
+  ]
+}
