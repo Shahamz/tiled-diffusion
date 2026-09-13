@@ -16,15 +16,15 @@ same latent band, giving two candidates the same descriptors is exactly what mak
 interchangeable: either one can be dropped into the crop and the seam with the
 neighbouring crop is the same.
 
-All candidates of a crop are also generated at the same size -- the crop's size.
+All candidates of a crop are also generated at the same size.
 
 --------------------------------------------------------------------------------
 Layout
 --------------------------------------------------------------------------------
-The layout is read from the crops' positions in the config: the crops are sorted by
-their y coordinate, top to bottom, and each one is connected to the one below it.
-Only a vertical stack is supported, so every crop must share the same x and width;
-anything else is rejected rather than guessed at.
+The order of the crops is read from their positions in the config: they are sorted by
+their y coordinate, top to bottom, and each one is connected to the one below it. Only a
+vertical stack is supported, so every crop must share the same x and width; anything else
+is rejected rather than guessed at.
 
 Sides are indexed [Right, Left, Up, Down] (see config.py). With the crops in top to
 bottom order, junction `i` sits between crop `i-1` and crop `i`:
@@ -41,13 +41,23 @@ Left and right sides are left unconstrained. With a single crop nothing connects
 anything and each tile is an ordinary unconstrained generation.
 
 --------------------------------------------------------------------------------
-Size snapping
+Two sizing modes
 --------------------------------------------------------------------------------
+`build_latents` takes `force_square_size`, which run.py drives from one macro:
+
+  force_square_size = N     every tile is generated as an N x N square and the crop boxes
+                            in the config are used only for ordering. The final image is
+                            the tiles stacked, N wide by N * num_crops tall, so it is not
+                            the config's width x height.
+
+  force_square_size = None  every tile is generated at its own crop's size and pasted
+                            back into the crop's exact box, so the final image comes out
+                            at exactly the config's width x height.
+
 Stable Diffusion's UNet downsamples by 8, so a latent side must be divisible by 8 and a
-pixel side by 64. Crop sizes from the config are rarely multiples of 64 (208, 432, ...),
-so each crop is generated at the nearest multiple of 64. The generated tile is resized
-back to the crop's exact size when the final combination image is composed, which is why
-the combinations come out at exactly the config's width x height.
+pixel side by 64. Sizes coming from either mode are rounded to the nearest multiple of 64
+for generation; in config-size mode the tile is resized back to the crop's exact size
+when the final image is composed.
 """
 
 from latent_class import LatentClass
@@ -60,13 +70,19 @@ SIZE_GRANULARITY = 64
 
 
 class PlacedCrop:
-    """A crop, its position in the top-to-bottom chain, and the size we generate it at."""
+    """A crop, its position in the top-to-bottom chain, the size we generate it at,
+    and the box it occupies in the final image."""
 
-    def __init__(self, crop, position, gen_width, gen_height):
+    def __init__(self, crop, position, gen_width, gen_height,
+                 place_x, place_y, place_width, place_height):
         self.crop = crop                # the config's Crop, with its exact x/y/width/height
         self.position = position        # 0 = topmost, num_crops - 1 = bottommost
-        self.gen_width = gen_width      # snapped to a multiple of 64
+        self.gen_width = gen_width      # size we generate at, a multiple of 64
         self.gen_height = gen_height
+        self.place_x = place_x          # where the finished tile goes in the final image
+        self.place_y = place_y
+        self.place_width = place_width
+        self.place_height = place_height
         self.tile_indices = []          # positions of this crop's candidates in latents_arr
 
     @property
@@ -75,8 +91,20 @@ class PlacedCrop:
         return self.crop.index
 
     @property
-    def was_snapped(self):
-        return (self.gen_width, self.gen_height) != (self.crop.width, self.crop.height)
+    def needs_resize(self):
+        return (self.gen_width, self.gen_height) != (self.place_width, self.place_height)
+
+
+class Layout:
+    """The crops in chain order, plus the size of the image they compose into."""
+
+    def __init__(self, placed_crops, canvas_width, canvas_height):
+        self.placed_crops = placed_crops
+        self.canvas_width = canvas_width
+        self.canvas_height = canvas_height
+
+    def __iter__(self):
+        return iter(self.placed_crops)
 
 
 def snap_to_granularity(value):
@@ -100,11 +128,35 @@ def order_crops_top_to_bottom(cfg):
         raise ValueError(f"Two or more crops share the same 'y' ({sorted(ys)}), so their top to "
                          f"bottom order is ambiguous.")
 
-    ordered = sorted(cfg.crops, key=lambda crop: crop.y)
-    return [PlacedCrop(crop, position,
-                       snap_to_granularity(crop.width),
-                       snap_to_granularity(crop.height))
-            for position, crop in enumerate(ordered)]
+    return sorted(cfg.crops, key=lambda crop: crop.y)
+
+
+def plan_layout(cfg, force_square_size=None):
+    """Decide what size each crop is generated at and where its tile lands in the final image."""
+    ordered = order_crops_top_to_bottom(cfg)
+
+    if force_square_size is not None:
+        # Squares of a single size, stacked. The config's boxes only gave us the order.
+        size = snap_to_granularity(force_square_size)
+        placed_crops = [
+            PlacedCrop(crop, position,
+                       gen_width=size, gen_height=size,
+                       place_x=0, place_y=position * size,
+                       place_width=size, place_height=size)
+            for position, crop in enumerate(ordered)
+        ]
+        return Layout(placed_crops, canvas_width=size, canvas_height=size * len(ordered))
+
+    # Each crop at its own size, back in its own box.
+    placed_crops = [
+        PlacedCrop(crop, position,
+                   gen_width=snap_to_granularity(crop.width),
+                   gen_height=snap_to_granularity(crop.height),
+                   place_x=crop.x, place_y=crop.y,
+                   place_width=crop.width, place_height=crop.height)
+        for position, crop in enumerate(ordered)
+    ]
+    return Layout(placed_crops, canvas_width=cfg.image_width, canvas_height=cfg.image_height)
 
 
 def crop_side_descriptors(position, num_crops):
@@ -132,17 +184,17 @@ def crop_side_descriptors(position, num_crops):
     return side_id, side_dir
 
 
-def build_latents(cfg):
+def build_latents(cfg, force_square_size=None):
     """Build every candidate tile for every crop.
 
-    Returns (latents_arr, placed_crops). `latents_arr` is the flat list handed to
-    SDLatentTiling, in top-to-bottom crop order; each PlacedCrop records which positions
-    in that list are its own candidates, in `tile_indices`.
+    Returns (latents_arr, layout). `latents_arr` is the flat list handed to SDLatentTiling,
+    in top-to-bottom crop order; each PlacedCrop in the layout records which positions in
+    that list are its own candidates, in `tile_indices`.
     """
-    placed_crops = order_crops_top_to_bottom(cfg)
+    layout = plan_layout(cfg, force_square_size)
     latents_arr = []
 
-    for placed in placed_crops:
+    for placed in layout:
         side_id, side_dir = crop_side_descriptors(placed.position, cfg.num_crops)
 
         for candidate_idx in range(cfg.tiles_per_crop):
@@ -158,7 +210,7 @@ def build_latents(cfg):
             placed.tile_indices.append(len(latents_arr))
             latents_arr.append(latent)
 
-    return latents_arr, placed_crops
+    return latents_arr, layout
 
 
 def check_max_width(max_width):
@@ -169,31 +221,30 @@ def check_max_width(max_width):
                          f"latent divisible by 8.")
 
 
-def describe(cfg, latents_arr, placed_crops):
+def describe(cfg, latents_arr, layout):
     """Return a human readable table of the layout and wiring, for --dry-run."""
     lines = []
-    lines.append(f"image {cfg.image_width}x{cfg.image_height}, "
-                 f"{cfg.num_crops} crops x {cfg.tiles_per_crop} candidates = {len(latents_arr)} tiles")
+    lines.append(f"{cfg.num_crops} crops x {cfg.tiles_per_crop} candidates = {len(latents_arr)} tiles, "
+                 f"composed into {layout.canvas_width}x{layout.canvas_height} "
+                 f"(config image is {cfg.image_width}x{cfg.image_height})")
     lines.append("")
     lines.append("Crops, top to bottom:")
-    lines.append(f"  {'pos':>3}  {'cfg':>3}  {'box (x,y,w,h)':<24}  {'generated at':<14}  note")
-    for placed in placed_crops:
+    lines.append(f"  {'pos':>3}  {'cfg':>3}  {'config box (x,y,w,h)':<24}  "
+                 f"{'generated':<12}  {'placed at (x,y,w,h)':<24}")
+    for placed in layout:
         crop = placed.crop
         box = f"({crop.x},{crop.y}) {crop.width}x{crop.height}"
         gen = f"{placed.gen_width}x{placed.gen_height}"
-        note = "snapped to a multiple of 64" if placed.was_snapped else ""
-        lines.append(f"  {placed.position:>3}  {placed.index:>3}  {box:<24}  {gen:<14}  {note}")
-
-    covered = sum(placed.crop.height for placed in placed_crops)
-    if covered != cfg.image_height:
-        lines.append(f"  note: the crops cover {covered}px of the image's {cfg.image_height}px height")
+        place = (f"({placed.place_x},{placed.place_y}) "
+                 f"{placed.place_width}x{placed.place_height}")
+        lines.append(f"  {placed.position:>3}  {placed.index:>3}  {box:<24}  {gen:<12}  {place:<24}")
 
     lines.append("")
     lines.append(f"{'idx':>4}  {'pos':>3}  {'cfg':>3}  {'cand':>4}  "
                  f"{'side_id (R,L,U,D)':<22}  {'side_dir (R,L,U,D)':<30}  prompt")
     lines.append("-" * 130)
 
-    for placed in placed_crops:
+    for placed in layout:
         for candidate_idx, flat_idx in enumerate(placed.tile_indices):
             latent = latents_arr[flat_idx]
             lines.append(

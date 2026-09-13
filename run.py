@@ -3,8 +3,8 @@
     python run.py --config configs/example_portrait.json
 
 The config format is described in crop_config.py, and the crop -> tile layout in
-crop_layout.py. Tile sizes and their arrangement come from the config's `crops`; the
-combination images come out at the config's `width` x `height`.
+crop_layout.py. The crops' order always comes from the config; their sizes come from
+either the config or FORCE_SQUARE_TILE_SIZE below.
 
 Use --dry-run to check the config and the layout without loading Stable Diffusion.
 """
@@ -20,6 +20,14 @@ from crop_layout import build_latents, check_max_width, describe
 from crop_output import save_all_combinations, save_run_meta, save_tiles
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# Generate every tile as a square of this many pixels, whatever sizes the config's crops
+# have. The combination images are then the tiles stacked, so they are this wide and
+# this tall times the number of crops, not the config's width x height.
+#
+# Set this to None to use each crop's own size from the config instead, in which case the
+# combination images come out at exactly the config's width x height.
+FORCE_SQUARE_TILE_SIZE = 512
 
 
 def parse_args():
@@ -59,9 +67,9 @@ def main():
     check_max_width(args.max_width)
 
     cfg = load_crop_config(args.config)
-    latents_arr, placed_crops = build_latents(cfg)
+    latents_arr, layout = build_latents(cfg, force_square_size=FORCE_SQUARE_TILE_SIZE)
 
-    print(describe(cfg, latents_arr, placed_crops))
+    print(describe(cfg, latents_arr, layout))
 
     if args.dry_run:
         print("--dry-run: stopping before loading the model.")
@@ -93,10 +101,10 @@ def main():
 
     out_dir = os.path.join(args.out, cfg.output_name)
     os.makedirs(out_dir, exist_ok=True)
-    save_tiles(latents_arr, placed_crops, out_dir)
-    combo_paths = save_all_combinations(cfg, latents_arr, placed_crops, out_dir,
+    save_tiles(latents_arr, layout, out_dir)
+    combo_paths = save_all_combinations(latents_arr, layout, out_dir,
                                         max_combos=args.max_combos)
-    save_run_meta(cfg, args, placed_crops, out_dir)
+    save_run_meta(cfg, args, layout, out_dir)
 
     if args.show and combo_paths:
         import matplotlib.pyplot as plt
