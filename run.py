@@ -3,8 +3,9 @@
     python run.py --config configs/example_portrait.json
 
 The config format is described in crop_config.py, and the crop -> tile layout in
-crop_layout.py. The crops' order always comes from the config; their sizes come from
-either the config or FORCE_SQUARE_TILE_SIZE below.
+crop_layout.py. Tile sizes come from either FORCE_SQUARE_TILE_SIZE below or the config's
+crop boxes; that choice also decides whether the crops are chained in the order the config
+lists them or in the order their boxes stack.
 
 Use --dry-run to check the config and the layout without loading Stable Diffusion.
 """
@@ -21,8 +22,9 @@ from crop_output import save_all_combinations, save_run_meta, save_tiles
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-# Generate every tile as a square of this many pixels, whatever sizes the config's crops
-# have. The combination images are then the tiles stacked, so they are this wide and
+# Generate every tile as a square of this many pixels, ignoring the config's crop boxes
+# entirely: the crops are chained in the order the config lists them, so any arrangement
+# of boxes works. The combination images are the tiles stacked, so they are this wide and
 # this tall times the number of crops, not the config's width x height.
 #
 # Set this to None to use each crop's own size from the config instead, in which case the

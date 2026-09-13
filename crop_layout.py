@@ -21,10 +21,12 @@ All candidates of a crop are also generated at the same size.
 --------------------------------------------------------------------------------
 Layout
 --------------------------------------------------------------------------------
-The order of the crops is read from their positions in the config: they are sorted by
-their y coordinate, top to bottom, and each one is connected to the one below it. Only a
-vertical stack is supported, so every crop must share the same x and width; anything else
-is rejected rather than guessed at.
+The crops form a chain, each one connected to the next. Where that order comes from
+depends on the sizing mode below: when tile sizes are forced the config's crop boxes say
+nothing we need, so the order is simply the order they are listed in, which is already the
+order `tile_prompts` is in. When sizes come from the config the boxes do matter, so the
+crops are sorted by their y coordinate, top to bottom; that path supports a vertical stack
+only, and rejects anything else rather than guessing at it.
 
 Sides are indexed [Right, Left, Up, Down] (see config.py). With the crops in top to
 bottom order, junction `i` sits between crop `i-1` and crop `i`:
@@ -46,9 +48,9 @@ Two sizing modes
 `build_latents` takes `force_square_size`, which run.py drives from one macro:
 
   force_square_size = N     every tile is generated as an N x N square and the crop boxes
-                            in the config are used only for ordering. The final image is
-                            the tiles stacked, N wide by N * num_crops tall, so it is not
-                            the config's width x height.
+                            in the config are ignored entirely, including their positions.
+                            The final image is the tiles stacked in config order, N wide by
+                            N * num_crops tall, so it is not the config's width x height.
 
   force_square_size = None  every tile is generated at its own crop's size and pasted
                             back into the crop's exact box, so the final image comes out
@@ -113,7 +115,11 @@ def snap_to_granularity(value):
 
 
 def order_crops_top_to_bottom(cfg):
-    """Sort the config's crops into a vertical chain, rejecting anything that is not one."""
+    """Sort the config's crops into a vertical chain, rejecting anything that is not one.
+
+    Only used when tile sizes come from the config. When sizes are forced the boxes are
+    ignored and the crops are chained in the order the config lists them.
+    """
     xs = {crop.x for crop in cfg.crops}
     widths = {crop.width for crop in cfg.crops}
     if len(xs) > 1 or len(widths) > 1:
@@ -133,21 +139,22 @@ def order_crops_top_to_bottom(cfg):
 
 def plan_layout(cfg, force_square_size=None):
     """Decide what size each crop is generated at and where its tile lands in the final image."""
-    ordered = order_crops_top_to_bottom(cfg)
-
     if force_square_size is not None:
-        # Squares of a single size, stacked. The config's boxes only gave us the order.
+        # Squares of a single size, stacked. Nothing about the config's boxes is used: the
+        # crops are chained in the order they are listed, which is the order tile_prompts
+        # is in, so any arrangement of boxes works here, side by side ones included.
         size = snap_to_granularity(force_square_size)
         placed_crops = [
             PlacedCrop(crop, position,
                        gen_width=size, gen_height=size,
                        place_x=0, place_y=position * size,
                        place_width=size, place_height=size)
-            for position, crop in enumerate(ordered)
+            for position, crop in enumerate(cfg.crops)
         ]
-        return Layout(placed_crops, canvas_width=size, canvas_height=size * len(ordered))
+        return Layout(placed_crops, canvas_width=size, canvas_height=size * len(cfg.crops))
 
-    # Each crop at its own size, back in its own box.
+    # Each crop at its own size, back in its own box. Here the boxes decide the order.
+    ordered = order_crops_top_to_bottom(cfg)
     placed_crops = [
         PlacedCrop(crop, position,
                    gen_width=snap_to_granularity(crop.width),
@@ -228,7 +235,7 @@ def describe(cfg, latents_arr, layout):
                  f"composed into {layout.canvas_width}x{layout.canvas_height} "
                  f"(config image is {cfg.image_width}x{cfg.image_height})")
     lines.append("")
-    lines.append("Crops, top to bottom:")
+    lines.append("Crops, in chain order:")
     lines.append(f"  {'pos':>3}  {'cfg':>3}  {'config box (x,y,w,h)':<24}  "
                  f"{'generated':<12}  {'placed at (x,y,w,h)':<24}")
     for placed in layout:
