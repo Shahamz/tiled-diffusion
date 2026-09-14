@@ -4,13 +4,22 @@ import logging
 import PIL.Image
 import numpy as np
 import torch
-from diffusers import AutoencoderKL, UNet2DConditionModel, EulerDiscreteScheduler, DDPMScheduler, DDIMScheduler
+from diffusers import (AutoencoderKL, UNet2DConditionModel, EulerDiscreteScheduler, DDPMScheduler, DDIMScheduler,
+                       DPMSolverMultistepScheduler)
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
 from config import MODEL_ID_SD_1_5
 from latent_handler import LatentHandler
+from pixeldit.macros import PATCH_SIZE_PIXELS
+from pixeldit.pixeldit_model import load_pixeldit
+from pixeldit.text_encoder import MODEL_DTYPE, set_text_embeddings
 from utils import retrieve_latents, retrieve_timesteps, get_timesteps, randn_tensor, preprocess, generate_graph_groups
+
+# PixelDiT sampling constants, matching Mix_n_match/pipeline_mix_n_match.py.
+PIXEL_CHANNELS = 3          # PixelDiT denoises the image itself, not a 4 channel latent
+NUM_TRAIN_TIMESTEPS = 1000  # the model's time input is sigma * NUM_TRAIN_TIMESTEPS
+SOLVER_ORDER = 2            # order of the DPM-Solver++ multistep sampler PixelDiT's inference uses
 
 
 class SDLatentTiling:
@@ -232,6 +241,148 @@ class SDLatentTiling:
                 img_t_rgb = img_t_rgb[:, max_width * 8:-max_width * 8, :]
             elif latent.is_y():
                 img_t_rgb = img_t_rgb[max_width * 8:-max_width * 8, :, :]
+
+            latent.image = img_t_rgb
+
+        return latents_arr
+
+
+class PixelDiTLatentTiling:
+    """The same tiling run as SDLatentTiling, denoising with NVIDIA's PixelDiT instead of Stable Diffusion.
+
+    The differences that matter here are all consequences of PixelDiT being a *pixel space* model:
+
+      * a tile's tensor is the 3 channel image itself, at full resolution, so there is no VAE to encode or
+        decode through and `set_latents` is called with `downsample=1`;
+      * conditioning comes from Gemma-2-2b-it, not CLIP. Gemma (about 5 GB in bfloat16) and the transformer
+        (about 2.6 GB) do not fit on an 8 GB card together, so every prompt is encoded and cached first and
+        Gemma is freed before the checkpoint is loaded (pixeldit/text_encoder.py);
+      * sampling is DPM-Solver++ (order 2) on flow sigmas. That solver is *multistep*: it carries a history and
+        a step index, so unlike DDPM it cannot be shared between tiles and every tile gets its own;
+      * `max_width` / `max_replica_width` arrive counted in 16 pixel patches and are turned into pixels here,
+        so the LatentHandler band copies keep working unchanged.
+
+    The constraint schedule itself -- similarity, tiling, and the closing random padding pass -- is exactly the
+    one SDLatentTiling runs.
+    """
+
+    def __init__(self, scheduler="ddpm"):
+        # PixelDiT samples with flow DPM-Solver++ only, so the scheduler name run.py passes for the Stable
+        # Diffusion path has nothing to select here.
+        if scheduler is not None:
+            logging.warning(f"PixelDiT samples with flow DPM-Solver++ only; --scheduler {scheduler} is ignored")
+        # Both models are loaded in __call__, in the order their memory allows.
+        self.transformer = None
+        self.model_config = None
+
+    def build_scheduler(self, inference_steps, device):
+        """Build one tile's sampler: PixelDiT's inference settings, with the checkpoint's flow shift."""
+        scheduler = DPMSolverMultistepScheduler(
+            num_train_timesteps=NUM_TRAIN_TIMESTEPS,
+            solver_order=SOLVER_ORDER,
+            algorithm_type="dpmsolver++",
+            prediction_type="flow_prediction",
+            use_flow_sigmas=True,
+            flow_shift=self.model_config["scheduler"]["flow_shift"],
+        )
+        scheduler.set_timesteps(inference_steps, device=device)
+        return scheduler
+
+    def predict_velocity(self, latent, sigma, cfg_scale, device):
+        """Run the transformer for both guidance passes on one tile and combine them.
+
+        Returns a [1, 3, H, W] float32 flow velocity, the shape of the tile's own tensor.
+        """
+        # The model takes a stack of images, [batch, S, 3, H, W]; one tile at a time means batch = S = 1.
+        images = latent.post_latent.unsqueeze(0).to(MODEL_DTYPE)
+        # The exact time sigma * 1000 (scheduler.timesteps are rounded), in the model dtype.
+        model_time = torch.full((1,), sigma * NUM_TRAIN_TIMESTEPS, device=device, dtype=MODEL_DTYPE)
+        # [2, prompt length, text dim] -> [2, 1, prompt length, text dim]: one prompt per guidance pass.
+        text_embeds = latent.text_embeddings.unsqueeze(1).to(device=device, dtype=MODEL_DTYPE)
+        # Sequential classifier free guidance: the two passes one after the other give the same result as one
+        # batch of two for about half the memory, which is what fits next to the 1.3B checkpoint on 8 GB.
+        negative = self.transformer(images, model_time, text_embeds[:1], None)[0].float()
+        positive = self.transformer(images, model_time, text_embeds[1:], None)[0].float()
+        return negative + cfg_scale * (positive - negative)
+
+    @torch.no_grad()
+    def __call__(self, latents_arr, negative_prompt="", inference_steps=30, seed=42,
+                 cfg_scale=4.5, height=512, width=512, max_width=16, max_replica_width=5, strength=0.8,
+                 device='cpu'):
+        for latent in latents_arr:
+            if latent.source_image is not None:
+                raise NotImplementedError(
+                    "The PixelDiT path generates from noise only, so LatentClass.source_image is not supported. "
+                    "Use SDLatentTiling for image to image runs."
+                )
+
+        # The widths arrive in 16 pixel patches, but the LatentHandler methods slice the tensor itself, which
+        # here is the image, so from this point on they are pixels.
+        pad = max_width * PATCH_SIZE_PIXELS
+        replica = max_replica_width * PATCH_SIZE_PIXELS
+
+        set_text_embeddings(latents_arr, device)
+        self.transformer, self.model_config = load_pixeldit(device, MODEL_DTYPE)
+        logging.warning("Finished loading models..")
+
+        generator = torch.Generator(device='cuda')
+        generator.manual_seed(seed)
+        schedulers = []
+        for latent in latents_arr:
+            latent.set_latents(generator=generator, in_channels=PIXEL_CHANNELS, max_width=pad, downsample=1)
+            schedulers.append(self.build_scheduler(inference_steps, device))
+        # Every tile's sampler was built the same way, so any of them can drive the loop.
+        timesteps, sigmas = schedulers[0].timesteps, schedulers[0].sigmas
+
+        graph_groups = generate_graph_groups(latents_arr)
+        for i, t in tqdm(enumerate(timesteps)):
+            logging.warning(f"Running step {i} of {inference_steps}")
+            logging.warning(f"Applying Similarity Constraint")
+            latents_arr = LatentHandler.apply_similarity_constraint(latents_arr, i,
+                                                                    groups=graph_groups,
+                                                                    max_width=pad,
+                                                                    max_replica_width=replica)
+            for latent in latents_arr:
+                latent.clone_post_latents()
+            logging.warning(f"Tiling latents")
+            latents_arr = LatentHandler.tile(latents_arr, i, groups=graph_groups, max_width=pad)
+            sigma = sigmas[i].item()
+            for latent, scheduler in zip(latents_arr, schedulers):
+                torch.cuda.empty_cache()
+                gc.collect()
+                # Flow matching: the model predicts the velocity, noise - image, rather than the noise.
+                velocity = self.predict_velocity(latent, sigma, cfg_scale, device)
+                latent.pre_latent = scheduler.step(velocity, t, latent.post_latent).prev_sample
+                latent.clone_post_latents()
+
+        logging.warning("Getting images")
+        logging.warning(f"Applying Similarity Constraint")
+        latents_arr = LatentHandler.apply_similarity_constraint(latents_arr, inference_steps,
+                                                                groups=graph_groups,
+                                                                max_width=pad,
+                                                                max_replica_width=replica)
+        for latent in latents_arr:
+            latent.clone_post_latents()
+        logging.warning(f"Tiling latents")
+        latents_arr = LatentHandler.tile(latents_arr, inference_steps, groups=graph_groups, max_width=pad)
+
+        logging.warning(f"Applying Random Padding Constraint")
+        latents_arr = LatentHandler.apply_random_padding_constraint(latents_arr, groups=graph_groups,
+                                                                    max_width=pad)
+
+        for latent in latents_arr:
+            torch.cuda.empty_cache()
+            gc.collect()
+            # Pixel space: the tensor is the image already, so there is no VAE decode, only the [-1, 1] to
+            # [0, 1] rescale and the same padding crop the Stable Diffusion path does.
+            image_t = ((latent.post_latent[0].float().clamp(-1, 1) + 1) / 2).cpu().numpy()
+            img_t_rgb = np.transpose(image_t, (1, 2, 0))
+            if latent.is_xy():
+                img_t_rgb = img_t_rgb[pad:-pad, pad:-pad, :]
+            elif latent.is_x():
+                img_t_rgb = img_t_rgb[:, pad:-pad, :]
+            elif latent.is_y():
+                img_t_rgb = img_t_rgb[pad:-pad, :, :]
 
             latent.image = img_t_rgb
 

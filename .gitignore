@@ -1,0 +1,6 @@
+# Downloaded model weights (PixelDiT checkpoint + Gemma text encoder) and the encoded prompt cache.
+# Both are recreated on demand; either may be a symlink to an existing copy.
+/weights/
+/weights
+/prompt_cache/
+/prompt_cache

@@ -220,8 +220,17 @@ def build_latents(cfg, force_square_size=None):
     return latents_arr, layout
 
 
-def check_max_width(max_width):
-    """The tiling padding is added to the latent, so it too must keep it divisible by 8."""
+def check_max_width(max_width, patch_units=False):
+    """The tiling padding is added to the tensor, so it has to keep the tensor a legal model input.
+
+    With `patch_units` (the PixelDiT path) --max-width counts whole 16 pixel patches, so any positive
+    value is already patch aligned and nothing more has to be checked.
+    """
+    if patch_units:
+        if max_width < 1:
+            raise ValueError(f"--max-width counts PixelDiT patches, so it must be at least 1, got {max_width}.")
+        return
+
     if max_width < 4 or (2 * max_width) % 8 != 0:
         raise ValueError(f"--max-width must be a positive multiple of 4, got {max_width}. "
                          f"The padding it adds ({2 * max_width} latent pixels) has to keep the "

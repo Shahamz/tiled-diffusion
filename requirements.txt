@@ -1,3 +1,9 @@
+# These pins are the Stable Diffusion 1.5 path (run.py: USE_PIXELDIT = False).
+# The PixelDiT path needs a newer stack than they describe:
+#   torch >= 2.5         (torch.nn.attention.flex_attention)
+#   diffusers >= 0.32    (DPMSolverMultistepScheduler use_flow_sigmas / flow_shift)
+#   transformers >= 4.42 (Gemma2Model)
+# plus huggingface_hub, which downloads the checkpoint and the text encoder.
 --extra-index-url https://download.pytorch.org/whl/cu118
 torch==2.2.1+cu118
 torchvision==0.17.1+cu118

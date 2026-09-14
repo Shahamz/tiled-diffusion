@@ -57,28 +57,31 @@ class LatentClass:
     def is_y(self):
         return self.side_dir[2] or self.side_dir[3]
 
-    def set_latents(self, generator, in_channels=4, max_width=10):
+    def set_latents(self, generator, in_channels=4, max_width=10, downsample=8):
+        # `downsample` is the model's latent scale: 8 for Stable Diffusion's VAE, 1 for a pixel space model such
+        # as PixelDiT, whose tensor is the image itself. `max_width` is in the same units as the tensor.
+        height, width = self.height // downsample, self.width // downsample
         if self.is_xy():
             self.pre_latent = torch.randn(
-                (1, in_channels, self.height // 8 + 2 * max_width, self.width // 8 + 2 * max_width),
+                (1, in_channels, height + 2 * max_width, width + 2 * max_width),
                 generator=generator,
                 device='cuda',
             )
         elif self.is_x():
             self.pre_latent = torch.randn(
-                (1, in_channels, self.height // 8, self.width // 8 + 2 * max_width),
+                (1, in_channels, height, width + 2 * max_width),
                 generator=generator,
                 device='cuda',
             )
         elif self.is_y():
             self.pre_latent = torch.randn(
-                (1, in_channels, self.height // 8 + 2 * max_width, self.width // 8),
+                (1, in_channels, height + 2 * max_width, width),
                 generator=generator,
                 device='cuda',
             )
         else:
             self.pre_latent = torch.randn(
-                (1, in_channels, self.height // 8, self.width // 8),
+                (1, in_channels, height, width),
                 generator=generator,
                 device='cuda',
             )
